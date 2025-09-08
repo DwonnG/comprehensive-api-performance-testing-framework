@@ -1,0 +1,30 @@
+# Core testing dependencies
+pytest>=7.4.3
+pytest-asyncio>=0.21.0
+pytest-html>=4.1.0
+pytest-rerunfailures>=12.0
+pytest-xdist>=3.5.0
+
+# HTTP and async libraries
+requests>=2.32.4
+aiohttp>=3.12.0
+httpx>=0.25.0
+
+# Data generation and utilities
+Faker>=19.0.0
+tenacity>=9.0.0
+PyYAML>=6.0.0
+
+# Type checking and code quality
+mypy>=1.2.0
+types-requests>=2.32.0
+types-PyYAML>=6.0.0
+
+# Performance testing
+asyncio-throttle>=1.0.0
+statistics>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+colorama>=0.4.6
+tabulate>=0.9.0

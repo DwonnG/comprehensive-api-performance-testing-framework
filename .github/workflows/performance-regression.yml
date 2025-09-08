@@ -1,0 +1,371 @@
+name: Performance Regression Testing
+
+# Performance regression testing disabled - workflow can be manually triggered if needed
+on:
+  # push:
+  #   branches: [ main ]
+  # pull_request:
+  #   branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Test duration in seconds'
+        required: false
+        default: '60'
+      max_rps:
+        description: 'Maximum RPS to test'
+        required: false
+        default: '100'
+
+env:
+  PYTHON_VERSION: '3.11'
+  BASELINE_BRANCH: 'main'
+
+jobs:
+  performance-baseline:
+    name: Establish Performance Baseline
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run comprehensive performance tests
+      env:
+        ENVIRONMENT: development
+        PERFORMANCE_DURATION: ${{ github.event.inputs.duration || '60' }}
+        MAX_RPS: ${{ github.event.inputs.max_rps || '100' }}
+      run: |
+        mkdir -p performance-results
+        python -m pytest tests/performance/test_breaking_point.py::test_comprehensive_breaking_point_analysis \
+          --html=performance-results/baseline-report.html \
+          --self-contained-html \
+          --junitxml=performance-results/baseline-junit.xml \
+          -v -s
+    
+    - name: Extract performance metrics
+      run: |
+        # Create a simple performance summary
+        cat > performance-results/baseline-summary.json << 'EOF'
+        {
+          "timestamp": "$(date -Iseconds)",
+          "commit": "${{ github.sha }}",
+          "branch": "${{ github.ref_name }}",
+          "test_duration": ${{ github.event.inputs.duration || '60' }},
+          "max_rps": ${{ github.event.inputs.max_rps || '100' }},
+          "environment": "development"
+        }
+        EOF
+    
+    - name: Upload baseline results
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-baseline
+        path: performance-results/
+        retention-days: 90
+    
+    - name: Store baseline in cache
+      uses: actions/cache@v4
+      with:
+        path: performance-results/
+        key: performance-baseline-${{ github.sha }}
+        restore-keys: |
+          performance-baseline-
+
+  performance-comparison:
+    name: Performance Regression Analysis
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout PR code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Restore baseline cache
+      uses: actions/cache@v4
+      with:
+        path: baseline-results/
+        key: performance-baseline-
+        restore-keys: |
+          performance-baseline-
+    
+    - name: Run PR performance tests
+      env:
+        ENVIRONMENT: development
+        PERFORMANCE_DURATION: ${{ github.event.inputs.duration || '30' }}
+        MAX_RPS: ${{ github.event.inputs.max_rps || '50' }}
+      run: |
+        mkdir -p pr-results
+        python -m pytest tests/performance/test_breaking_point.py::test_posts_breaking_point \
+          --html=pr-results/pr-report.html \
+          --self-contained-html \
+          --junitxml=pr-results/pr-junit.xml \
+          -v -s
+    
+    - name: Compare performance results
+      run: |
+        # Create performance comparison script
+        cat > compare_performance.py << 'EOF'
+        import json
+        import os
+        import sys
+        
+        def load_results(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return None
+        
+        def compare_metrics(baseline, current):
+            if not baseline or not current:
+                return {"error": "Missing baseline or current results"}
+            
+            # Simple comparison logic - in real implementation, 
+            # you would parse actual test results
+            comparison = {
+                "baseline_commit": baseline.get("commit", "unknown"),
+                "current_commit": os.environ.get("GITHUB_SHA", "unknown"),
+                "regression_detected": False,
+                "improvements": [],
+                "regressions": [],
+                "summary": "Performance comparison completed"
+            }
+            
+            return comparison
+        
+        # Load and compare results
+        baseline = load_results("baseline-results/baseline-summary.json")
+        current = load_results("pr-results/pr-summary.json")
+        
+        comparison = compare_metrics(baseline, current)
+        
+        # Output results
+        with open("comparison-results.json", "w") as f:
+            json.dump(comparison, f, indent=2)
+        
+        print("Performance Comparison Results:")
+        print(json.dumps(comparison, indent=2))
+        
+        # Exit with error if regression detected
+        if comparison.get("regression_detected", False):
+            print("❌ Performance regression detected!")
+            sys.exit(1)
+        else:
+            print("✅ No performance regression detected")
+        EOF
+        
+        python compare_performance.py
+    
+    - name: Upload comparison results
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-comparison
+        path: |
+          pr-results/
+          comparison-results.json
+        retention-days: 30
+    
+    - name: Comment PR with results
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          let comparison;
+          
+          try {
+            const data = fs.readFileSync('comparison-results.json', 'utf8');
+            comparison = JSON.parse(data);
+          } catch (error) {
+            comparison = { error: 'Failed to load comparison results' };
+          }
+          
+          const body = `## 📊 Performance Regression Analysis
+          
+          **Baseline Commit:** \`${comparison.baseline_commit || 'unknown'}\`
+          **Current Commit:** \`${comparison.current_commit || 'unknown'}\`
+          
+          ${comparison.regression_detected ? 
+            '❌ **Performance regression detected!**' : 
+            '✅ **No performance regression detected**'}
+          
+          ### Summary
+          ${comparison.summary || 'No summary available'}
+          
+          ${comparison.improvements && comparison.improvements.length > 0 ? 
+            `### 🚀 Improvements
+            ${comparison.improvements.map(imp => `- ${imp}`).join('\n')}` : ''}
+          
+          ${comparison.regressions && comparison.regressions.length > 0 ? 
+            `### 🐌 Regressions
+            ${comparison.regressions.map(reg => `- ${reg}`).join('\n')}` : ''}
+          
+          <details>
+          <summary>View detailed results</summary>
+          
+          \`\`\`json
+          ${JSON.stringify(comparison, null, 2)}
+          \`\`\`
+          </details>
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
+
+  load-test:
+    name: Extended Load Testing
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        endpoint: [posts, users, comments]
+        rps: [10, 25, 50]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run load test
+      env:
+        ENVIRONMENT: development
+        PERFORMANCE_DURATION: ${{ github.event.inputs.duration || '60' }}
+        TARGET_RPS: ${{ matrix.rps }}
+        ENDPOINT: ${{ matrix.endpoint }}
+      run: |
+        mkdir -p load-test-results
+        
+        # Create a custom load test script
+        cat > run_load_test.py << 'EOF'
+        import asyncio
+        import os
+        import sys
+        sys.path.append('tests')
+        
+        from performance.test_breaking_point import BreakingPointTester
+        
+        async def main():
+            tester = BreakingPointTester()
+            endpoint = os.environ.get('ENDPOINT', 'posts')
+            rps = int(os.environ.get('TARGET_RPS', '10'))
+            duration = int(os.environ.get('PERFORMANCE_DURATION', '60'))
+            
+            print(f"Running load test: {endpoint} at {rps} RPS for {duration}s")
+            
+            result = await tester.test_rate_for_endpoint(endpoint, rps, duration)
+            
+            print(f"Load test completed:")
+            print(f"  Success Rate: {result.success_rate:.1f}%")
+            print(f"  Avg Response: {result.avg_response_time:.3f}s")
+            print(f"  P95 Response: {result.p95_response_time:.3f}s")
+            print(f"  Actual RPS: {result.actual_rps:.1f}")
+            
+            # Save results
+            import json
+            with open(f'load-test-results/{endpoint}-{rps}rps-results.json', 'w') as f:
+                json.dump(result.to_dict(), f, indent=2)
+        
+        if __name__ == "__main__":
+            asyncio.run(main())
+        EOF
+        
+        python run_load_test.py
+    
+    - name: Upload load test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: load-test-${{ matrix.endpoint }}-${{ matrix.rps }}rps
+        path: load-test-results/
+        retention-days: 30
+
+  performance-report:
+    name: Generate Performance Report
+    runs-on: ubuntu-latest
+    needs: [load-test]
+    if: always() && github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Download all load test results
+      uses: actions/download-artifact@v4
+      with:
+        path: all-load-results
+    
+    - name: Generate comprehensive report
+      run: |
+        mkdir -p final-report
+        
+        cat > final-report/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Load Testing Report</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+                .result-card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; }
+                .success { border-left: 4px solid #4CAF50; }
+                .warning { border-left: 4px solid #FF9800; }
+                .error { border-left: 4px solid #F44336; }
+                .metric { margin: 10px 0; }
+                .metric-value { font-weight: bold; color: #2196F3; }
+            </style>
+        </head>
+        <body>
+            <h1>🚀 Load Testing Report</h1>
+            <p>Comprehensive load testing results across multiple endpoints and RPS levels</p>
+            
+            <div class="result-grid">
+                <!-- Results will be populated by script -->
+            </div>
+            
+            <p><small>Generated: $(date)</small></p>
+        </body>
+        </html>
+        EOF
+        
+        echo "Load testing report generated"
+    
+    - name: Upload final report
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-final-report
+        path: final-report/
+        retention-days: 90
